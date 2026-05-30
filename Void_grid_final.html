@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>VOID-GRID // STABILIZED</title>
+    <style>
+        :root { --grid: #00f2ff; --player: #ff00ff; }
+        body { margin: 0; background: #010208; overflow: hidden; touch-action: none; font-family: 'Inter', sans-serif; }
+        
+        #hud { position: absolute; top: 20px; left: 20px; right: 20px; pointer-events: none; z-index: 10; display: flex; justify-content: space-between; align-items: center; }
+        .lvl-container { border-left: 4px solid var(--grid); padding-left: 12px; }
+        .lvl-value { font-size: 32px; font-weight: 900; color: var(--grid); line-height: 1; }
+        
+        #msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #fff; letter-spacing: 10px; opacity: 0; transition: 0.4s; pointer-events: none; font-weight: bold; text-transform: uppercase; font-size: 18px; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+
+    <div id="hud">
+        <div class="lvl-container">
+            <div style="font-size: 10px; color: #fff; opacity: 0.5;">SECTOR</div>
+            <div class="lvl-value" id="lvlNum">01</div>
+        </div>
+        <div style="color: #fff; font-size: 10px; opacity: 0.3;">TOUCH TO WARP MESH</div>
+    </div>
+    <div id="msg">SYNCING...</div>
+
+    <canvas id="canvas"></canvas>
+
+<script>
+/**
+ * VOID-GRID STABILIZED ENGINE
+ * Original UI + "A Little Easy" Difficulty
+ */
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const lvlNumDisplay = document.getElementById('lvlNum');
+const msgDisplay = document.getElementById('msg');
+
+let width, height;
+let currentLevel = parseInt(localStorage.getItem('void_grid_final_lvl')) || 1;
+let grid = [];
+const spacing = 40;
+
+// Original player and goal sizes
+let player = { x: 0, y: 0, vx: 0, vy: 0, r: 10 };
+let goal = { x: 0, y: 0, r: 40 }; 
+let obstacles = [];
+let touch = { x: 0, y: 0, active: false };
+
+function seededRandom(seed) {
+    const x = Math.sin(seed) * 10000;
+    return x - Math.floor(x);
+}
+
+function initLevel(lvl) {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+    localStorage.setItem('void_grid_final_lvl', lvl);
+    lvlNumDisplay.innerText = lvl.toString().padStart(2, '0');
+
+    // Reset Player to start
+    player.x = 80; player.y = height / 2;
+    player.vx = 0; player.vy = 0;
+
+    // Fixed Goal Placement
+    goal.x = width - 100; 
+    goal.y = height / 2 + (seededRandom(lvl) - 0.5) * (height * 0.6);
+
+    // Grid Construction
+    grid = [];
+    for (let x = -spacing; x < width + spacing; x += spacing) {
+        for (let y = -spacing; y < height + spacing; y += spacing) {
+            grid.push({ ox: x, oy: y, x: x, y: y });
+        }
+    }
+
+    // Obstacle Generation (A little easier: caps at 6, shorter heights)
+    obstacles = [];
+    const obsCount = Math.min(6, 1 + Math.floor(lvl / 4)); 
+    const maxH = height * Math.min(0.35, 0.15 + (lvl * 0.02)); 
+
+    for(let i=0; i<obsCount; i++) {
+        const seed = lvl + i;
+        const isTop = seededRandom(seed + 1) > 0.5;
+        
+        const h = 50 + seededRandom(seed) * maxH; 
+        const paddedH = h + 150; 
+        const baseY = isTop ? -100 : height - h;
+
+        obstacles.push({
+            x: 250 + (i * (width - 400) / obsCount),
+            y: baseY,
+            baseY: baseY,
+            w: 30, // ORIGINAL UI WIDTH
+            h: paddedH,
+            isTop: isTop
+        });
+    }
+
+    notify(`SECTOR ${lvl} ONLINE`);
+}
+
+function physics() {
+    // 1. Grid Elasticity
+    grid.forEach(p => {
+        let tx = p.ox;
+        let ty = p.oy;
+        if (touch.active) {
+            const dx = touch.x - p.ox;
+            const dy = touch.y - p.oy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const strength = Math.max(0, 150 - dist) * 0.8;
+            tx += (dx / dist) * strength;
+            ty += (dy / dist) * strength;
+        }
+        p.x += (tx - p.x) * 0.2;
+        p.y += (ty - p.y) * 0.2;
+    });
+
+    // 2. Player Movement (Original 0.96 friction physics)
+    if (touch.active) {
+        const dx = touch.x - player.x;
+        const dy = touch.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        player.vx += (dx / dist) * 0.7; 
+        player.vy += (dy / dist) * 0.7;
+    }
+    player.vx *= 0.96; 
+    player.vy *= 0.96;
+    player.x += player.vx;
+    player.y += player.vy;
+
+    // 3. Collisions & Obstacle Movement
+    if (player.y < 0 || player.y > height) player.vy *= -1;
+    
+    obstacles.forEach((o, index) => {
+        // Dynamic Obstacle Movement (Delayed to level 5, moves slightly slower)
+        if (currentLevel >= 5) {
+            const moveSpeed = 0.0003 + (currentLevel * 0.00002); 
+            const moveRange = Math.min(80, 15 + (currentLevel * 2)); 
+            
+            const offset = Math.abs(Math.sin(Date.now() * moveSpeed + index)) * moveRange;
+            o.y = o.baseY + (o.isTop ? offset : -offset);
+        }
+
+        // Precise AABB Collision
+        if (player.x + player.r > o.x && player.x - player.r < o.x + o.w &&
+            player.y + player.r > o.y && player.y - player.r < o.y + o.h) {
+            initLevel(currentLevel);
+        }
+    });
+
+    // 4. Win Logic
+    if (Math.hypot(goal.x - player.x, goal.y - player.y) < goal.r) {
+        currentLevel++;
+        initLevel(currentLevel);
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#010208';
+    ctx.fillRect(0, 0, width, height);
+
+    // Mesh
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(0, 242, 255, 0.15)';
+    for (let x = -spacing; x < width + spacing; x += spacing) {
+        let col = grid.filter(p => p.ox === x);
+        ctx.moveTo(col[0].x, col[0].y);
+        col.forEach(p => ctx.lineTo(p.x, p.y));
+    }
+    for (let y = -spacing; y < height + spacing; y += spacing) {
+        let row = grid.filter(p => p.oy === y);
+        ctx.moveTo(row[0].x, row[0].y);
+        row.forEach(p => ctx.lineTo(p.x, p.y));
+    }
+    ctx.stroke();
+
+    // Goal
+    ctx.beginPath();
+    ctx.arc(goal.x, goal.y, goal.r + Math.sin(Date.now()*0.01)*5, 0, Math.PI*2);
+    ctx.strokeStyle = '#fff';
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // ORIGINAL OBSTACLE UI
+    ctx.fillStyle = 'rgba(255, 0, 100, 0.2)';
+    ctx.strokeStyle = '#ff0066';
+    obstacles.forEach(o => {
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.strokeRect(o.x, o.y, o.w, o.h);
+    });
+
+    // Player
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = '#ff00ff';
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    physics();
+    requestAnimationFrame(draw);
+}
+
+function notify(t) {
+    msgDisplay.innerText = t;
+    msgDisplay.style.opacity = 1;
+    setTimeout(() => msgDisplay.style.opacity = 0, 800);
+}
+
+// Interaction
+const upT = (e) => { const t = e.touches ? e.touches[0] : e; touch.x = t.clientX; touch.y = t.clientY; };
+window.addEventListener('touchstart', (e) => { touch.active = true; upT(e); }, {passive: false});
+window.addEventListener('touchmove', (e) => { upT(e); }, {passive: false});
+window.addEventListener('touchend', () => touch.active = false);
+window.addEventListener('mousedown', (e) => { touch.active = true; upT(e); });
+window.addEventListener('mousemove', (e) => { if(touch.active) upT(e); });
+window.addEventListener('mouseup', () => touch.active = false);
+window.addEventListener('resize', () => initLevel(currentLevel));
+
+initLevel(currentLevel);
+draw();
+</script>
+</body>
+</html>
